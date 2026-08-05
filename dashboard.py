@@ -157,6 +157,50 @@ def build_decode_calendar(months_back=1, months_ahead=18, today=None):
     return pd.DataFrame(rows)
 
 
+def parse_decode_month(value):
+    """
+    Robustly turn whatever is in a DECODE MONTH cell into (year, month).
+    Handles Timestamps, 'August 2026', 'Aug 2026', '2026-08', '08/2026',
+    extra whitespace, different casing, etc. Returns None if it can't
+    make sense of the value at all.
+    """
+
+    if pd.isna(value):
+        return None
+
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value.year, value.month
+
+    text = str(value).strip()
+
+    if not text:
+        return None
+
+    parsed = pd.to_datetime(text, errors="coerce")
+
+    if pd.isna(parsed):
+        # e.g. "August 2026" needs a day to parse cleanly
+        parsed = pd.to_datetime("1 " + text, errors="coerce")
+
+    if pd.isna(parsed):
+        return None
+
+    return parsed.year, parsed.month
+
+
+def decode_date_for_row(value):
+    """Compute the calendar decode date (last Saturday) directly from a DECODE MONTH cell."""
+
+    parsed = parse_decode_month(value)
+
+    if parsed is None:
+        return pd.NaT
+
+    year, month = parsed
+
+    return last_saturday(year, month)
+
+
 def in_reminder_window(decode_date, today):
     """True if today is within REMINDER_WINDOW_DAYS days before (or on) the decode date."""
 
@@ -190,19 +234,23 @@ def load_data():
 
     # The Excel file no longer needs to (and should not) carry a DATE
     # column - if one is present we drop it, and always recompute the
-    # decode date from the calendar instead.
+    # decode date from the calendar instead. Each row's DECODE MONTH
+    # cell is parsed directly (no string-matching against a separate
+    # calendar table), so formatting differences in the Excel file
+    # can't cause a silent mismatch.
     if "DATE" in df.columns:
         df = df.drop(columns=["DATE"])
 
-    calendar_dates = build_decode_calendar()
+    df["DATE"] = df["DECODE MONTH"].apply(decode_date_for_row)
 
-    df = df.merge(
-        calendar_dates,
-        on="DECODE MONTH",
-        how="left"
-    )
+    unparsed = df[df["DATE"].isna()]["DECODE MONTH"].unique()
 
-    df["DATE"] = pd.to_datetime(df["DATE"])
+    if len(unparsed) > 0:
+        st.warning(
+            "Could not read a decode date from these DECODE MONTH values - "
+            "check their spelling/format in the Excel file: "
+            + ", ".join(str(v) for v in unparsed)
+        )
 
     if "REMINDER SENT" not in df.columns:
         df["REMINDER SENT"] = "No"
